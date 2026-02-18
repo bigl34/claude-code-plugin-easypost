@@ -16,7 +16,7 @@ Create outbound UPS shipping labels for customer orders using the EasyPost API. 
 
 Run commands using Bash:
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/easypost-shipping-manager/scripts/dist/cli.js <command> [options]
+node /Users/USER/.claude/plugins/local-marketplace/easypost-shipping-manager/scripts/dist/cli.js <command> [options]
 ```
 
 | Command | Purpose |
@@ -104,7 +104,7 @@ Ask user for:
 ### Step 2: Create Shipment
 
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/easypost-shipping-manager/scripts/dist/cli.js \
+node /Users/USER/.claude/plugins/local-marketplace/easypost-shipping-manager/scripts/dist/cli.js \
   create-shipment --order-id "gid://shopify/Order/12345" --weight 15
 ```
 
@@ -144,7 +144,7 @@ Which rate would you like to purchase?
 Only after explicit confirmation:
 
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/easypost-shipping-manager/scripts/dist/cli.js \
+node /Users/USER/.claude/plugins/local-marketplace/easypost-shipping-manager/scripts/dist/cli.js \
   buy-label --shipment-id shp_abc123 --rate-id rate_xyz789
 ```
 
@@ -184,7 +184,7 @@ Update order {order_id} with tracking number {tracking_code} for carrier UPS.
 If user wants to cancel before purchasing:
 
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/easypost-shipping-manager/scripts/dist/cli.js \
+node /Users/USER/.claude/plugins/local-marketplace/easypost-shipping-manager/scripts/dist/cli.js \
   cancel-shipment --shipment-id shp_abc123
 ```
 
@@ -195,7 +195,7 @@ Returns: `{ success: true, message: "Shipment cancelled. No charges incurred." }
 If label was purchased but needs refund:
 
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/easypost-shipping-manager/scripts/dist/cli.js \
+node /Users/USER/.claude/plugins/local-marketplace/easypost-shipping-manager/scripts/dist/cli.js \
   void-label --shipment-id shp_abc123
 ```
 
@@ -259,6 +259,6 @@ For other operations, delegate to:
 - **Customer support**: gorgias-support-manager
 
 ## Self-Documentation
-Log API quirks/errors to: `/home/USER/biz/plugin-learnings/easypost-shipping-manager.md`
+Log API quirks/errors to: `/Users/USER/biz/plugin-learnings/easypost-shipping-manager.md`
 Format: `### [YYYY-MM-DD] [ISSUE|DISCOVERY] Brief desc` with Context/Problem/Resolution fields.
 Full workflow: `~/biz/docs/reference/agent-shared-context.md`

@@ -1,5 +1,5 @@
 {
   "name": "easypost-shipping-manager",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Create UPS shipping labels via EasyPost API with Shopify integration"
 }

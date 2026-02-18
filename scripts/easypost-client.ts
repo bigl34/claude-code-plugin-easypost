@@ -20,7 +20,7 @@ const STATE_PATH = "/tmp/easypost-pending-shipments.json";
 
 // Shopify CLI path
 const SHOPIFY_CLI =
-  "/home/USER/.claude/plugins/local-marketplace/shopify-order-manager/scripts/dist/cli.js";
+  "/Users/USER/.claude/plugins/local-marketplace/shopify-order-manager/scripts/dist/cli.js";
 
 // Interfaces
 interface EasyPostConfig {
