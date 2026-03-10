@@ -22,6 +22,23 @@ const createShipmentSchema = z.object({
   toPhone: z.string().optional().describe("Phone number"),
   toEmail: z.string().optional().describe("Email"),
 
+  // Custom from address (for return labels — overrides hardcoded warehouse)
+  fromName: z.string().optional().describe("Sender name (return labels)"),
+  fromStreet1: z.string().optional().describe("Sender street address line 1"),
+  fromStreet2: z.string().optional().describe("Sender street address line 2"),
+  fromCity: z.string().optional().describe("Sender city"),
+  fromState: z.string().optional().describe("Sender state/county"),
+  fromZip: z.string().optional().describe("Sender postal code"),
+  fromCountry: z.string().optional().describe("Sender country code"),
+  fromPhone: z.string().optional().describe("Sender phone number"),
+
+  // Return label flag
+  isReturn: z.boolean().optional().describe("Create a return label (swap label print direction)"),
+
+  // Label customization
+  contentDescription: z.string().trim().max(50).optional().describe("Package contents description (max 50 chars)"),
+  reference: z.string().trim().max(35).optional().describe("Order reference printed on label (max 35 chars, UPS limit)"),
+
   // Parcel dimensions
   weight: cliTypes.float(0.1).describe("Parcel weight in kg (required)"),
   length: cliTypes.float(1).optional().describe("Parcel length in cm"),
@@ -30,10 +47,17 @@ const createShipmentSchema = z.object({
 
   // Rate filtering
   carrier: z.string().optional().describe("Filter rates to carrier (e.g., UPS)"),
+  labelSize: z.string().optional().describe("Label size (default: 4x6)"),
+  labelFormat: z.string().optional().describe("Label format (default: PNG)"),
 }).refine(
   (data) => data.orderId || (data.toStreet1 && data.toCity && data.toZip),
   {
     message: "Either --order-id or manual address (--to-street1, --to-city, --to-zip) is required",
+  }
+).refine(
+  (data) => !data.fromStreet1 || (data.fromCity && data.fromZip),
+  {
+    message: "When using --from-street1, --from-city and --from-zip are also required",
   }
 );
 
@@ -51,7 +75,10 @@ const commands = {
     async (args, client: EasyPostShippingClient) => {
       const {
         orderId, toName, toStreet1, toStreet2, toCity, toState, toZip, toCountry,
-        toPhone, toEmail, weight, length, width, height, carrier,
+        toPhone, toEmail, fromName, fromStreet1, fromStreet2, fromCity, fromState,
+        fromZip, fromCountry, fromPhone, isReturn,
+        weight, length, width, height, carrier, labelSize, labelFormat,
+        contentDescription, reference,
       } = args as {
         orderId?: string;
         toName?: string;
@@ -63,11 +90,24 @@ const commands = {
         toCountry: string;
         toPhone?: string;
         toEmail?: string;
+        fromName?: string;
+        fromStreet1?: string;
+        fromStreet2?: string;
+        fromCity?: string;
+        fromState?: string;
+        fromZip?: string;
+        fromCountry?: string;
+        fromPhone?: string;
+        isReturn?: boolean;
         weight: number;
         length?: number;
         width?: number;
         height?: number;
         carrier?: string;
+        labelSize?: string;
+        labelFormat?: string;
+        contentDescription?: string;
+        reference?: string;
       };
 
       const createOptions: Parameters<typeof client.createShipment>[0] = {
@@ -78,6 +118,11 @@ const commands = {
           ...(height && { height }),
         },
         ...(carrier && { carrier }),
+        ...(labelSize && { labelSize }),
+        ...(labelFormat && { labelFormat }),
+        ...(isReturn && { isReturn }),
+        ...(contentDescription && { contentDescription }),
+        ...(reference && { reference }),
       };
 
       if (orderId) {
@@ -93,6 +138,20 @@ const commands = {
           country: toCountry,
           phone: toPhone,
           email: toEmail,
+        };
+      }
+
+      // Custom from address (for return labels)
+      if (fromStreet1) {
+        createOptions.fromAddress = {
+          name: fromName,
+          street1: fromStreet1,
+          street2: fromStreet2,
+          city: fromCity!,
+          state: fromState || "",
+          zip: fromZip!,
+          country: fromCountry || "GB",
+          phone: fromPhone,
         };
       }
 

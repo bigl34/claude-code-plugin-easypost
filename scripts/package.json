@@ -9,12 +9,12 @@
   },
   "dependencies": {
     "@easypost/api": "^7.0.0",
-    "@local/plugin-cache": "github:bigl34/claude-code-plugin-cache",
-    "@local/cli-utils": "github:bigl34/claude-code-plugin-shared"
+    "@local/cli-utils": "github:bigl34/claude-code-plugin-shared",
+    "@local/plugin-cache": "github:bigl34/claude-code-plugin-cache"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "tsx": "^4.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.9.3"
   }
 }

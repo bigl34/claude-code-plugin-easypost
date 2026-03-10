@@ -81,8 +81,14 @@ interface ShipmentState {
 interface CreateShipmentOptions {
   orderId?: string;
   toAddress?: Address;
+  fromAddress?: Address;
   parcel: Parcel;
   carrier?: string;
+  labelSize?: string;
+  labelFormat?: string;
+  isReturn?: boolean;
+  contentDescription?: string;
+  reference?: string;
 }
 
 interface PurchasedLabel {
@@ -152,6 +158,11 @@ export class EasyPostShippingClient {
     return cache.clear();
   }
 
+  /** Invalidates a specific cache key. @returns true if the key existed */
+  invalidateCacheKey(key: string): boolean {
+    return cache.invalidate(key);
+  }
+
   // ============================================
   // STATE MANAGEMENT (Internal)
   // ============================================
@@ -179,8 +190,8 @@ export class EasyPostShippingClient {
   private getFromAddress(): Address {
     return {
       company: "YOUR_COMPANY",
-      street1: "YOUR_WAREHOUSE_ADDRESS_LINE_1",
-      street2: "YOUR_WAREHOUSE_ADDRESS_LINE_2",
+      street1: "YOUR_WAREHOUSE_STREET",
+      street2: "YOUR_WAREHOUSE_CODE",
       city: "YOUR_CITY",
       state: "",
       zip: "YOUR_POSTCODE",
@@ -287,7 +298,7 @@ export class EasyPostShippingClient {
       throw new Error("Either orderId or toAddress must be provided");
     }
 
-    const fromAddress = this.getFromAddress();
+    const fromAddress = options.fromAddress || this.getFromAddress();
 
     // Build EasyPost shipment request
     const shipmentParams: any = {
@@ -304,7 +315,7 @@ export class EasyPostShippingClient {
         email: toAddress.email,
       },
       from_address: {
-        name: "YOUR_COMPANY Logistics",
+        name: fromAddress.name || (options.fromAddress ? undefined : "YOUR_COMPANY Logistics"),
         company: fromAddress.company,
         street1: fromAddress.street1,
         street2: fromAddress.street2,
@@ -326,6 +337,13 @@ export class EasyPostShippingClient {
         ...(options.parcel.height && {
           height: this.cmToInches(options.parcel.height),
         }),
+      },
+      ...(options.isReturn && { is_return: true }),
+      options: {
+        label_size: options.labelSize || "4x6",
+        label_format: options.labelFormat || "PNG",
+        ...(options.contentDescription && { content_description: options.contentDescription }),
+        ...(options.reference && { print_custom_1: options.reference, print_custom_1_code: "ON" }),
       },
     };
 
