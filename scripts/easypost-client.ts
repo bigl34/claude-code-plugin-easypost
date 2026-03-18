@@ -20,7 +20,7 @@ const STATE_PATH = "/tmp/easypost-pending-shipments.json";
 
 // Shopify CLI path
 const SHOPIFY_CLI =
-  "/Users/USER/.claude/plugins/local-marketplace/shopify-order-manager/scripts/dist/cli.js";
+  process.env.HOME + "/.claude/plugins/local-marketplace/shopify-order-manager/scripts/dist/cli.js";
 
 // Interfaces
 interface EasyPostConfig {
@@ -71,6 +71,8 @@ interface PendingShipment {
   status: "pending" | "purchased" | "voided";
   trackingCode?: string;
   labelUrl?: string;
+  saturdayDelivery?: boolean;
+  saturdayFallback?: boolean;
 }
 
 interface ShipmentState {
@@ -89,6 +91,7 @@ interface CreateShipmentOptions {
   isReturn?: boolean;
   contentDescription?: string;
   reference?: string;
+  saturdayDelivery?: boolean;
 }
 
 interface PurchasedLabel {
@@ -215,6 +218,67 @@ export class EasyPostShippingClient {
     return cm * 0.3937;
   }
 
+  /** Extract, filter, and sort rates from an EasyPost shipment response. */
+  private extractAndFilterRates(rates: any[] = [], carrierFilter?: string): Rate[] {
+    return rates
+      .filter((r) => !carrierFilter || r.carrier?.toLowerCase() === carrierFilter.toLowerCase())
+      .map((r) => ({
+        id: r.id,
+        carrier: r.carrier,
+        service: r.service,
+        rate: r.rate,
+        currency: r.currency,
+        delivery_days: r.delivery_days,
+        delivery_date: r.delivery_date,
+      }))
+      .sort((a, b) => parseFloat(a.rate) - parseFloat(b.rate));
+  }
+
+  /**
+   * Handles Saturday delivery fallback: retries shipment without saturday_delivery,
+   * persists the result with saturdayFallback flag.
+   */
+  private async handleSaturdayFallback(
+    shipmentParams: any,
+    opts: { carrier?: string; orderId?: string },
+    toAddress: Address,
+    fromAddress: Address,
+    parcel: Parcel,
+  ): Promise<PendingShipment> {
+    const retryParams = {
+      ...shipmentParams,
+      options: { ...shipmentParams.options },
+    };
+    delete retryParams.options.saturday_delivery;
+    const retryShipment = await this.client.Shipment.create(retryParams);
+    const retryRates = this.extractAndFilterRates(retryShipment.rates, opts.carrier);
+
+    if (retryRates.length === 0) {
+      throw new Error(
+        "No shipping rates available for this shipment. Check addresses and carrier configuration."
+      );
+    }
+
+    const fallbackShipment: PendingShipment = {
+      id: retryShipment.id,
+      createdAt: new Date().toISOString(),
+      orderId: opts.orderId,
+      toAddress,
+      fromAddress,
+      parcel,
+      rates: retryRates,
+      status: "pending",
+      saturdayDelivery: true,
+      saturdayFallback: true,
+    };
+
+    const state = this.loadState();
+    state.shipments[retryShipment.id] = fallbackShipment;
+    this.saveState(state);
+
+    return fallbackShipment;
+  }
+
   // ============================================
   // SHOPIFY INTEGRATION
   // ============================================
@@ -300,6 +364,9 @@ export class EasyPostShippingClient {
 
     const fromAddress = options.fromAddress || this.getFromAddress();
 
+    // Saturday delivery not applicable to return labels — silently normalize
+    const effectiveSaturdayDelivery = options.saturdayDelivery && !options.isReturn;
+
     // Build EasyPost shipment request
     const shipmentParams: any = {
       to_address: {
@@ -344,6 +411,7 @@ export class EasyPostShippingClient {
         label_format: options.labelFormat || "PNG",
         ...(options.contentDescription && { content_description: options.contentDescription }),
         ...(options.reference && { print_custom_1: options.reference, print_custom_1_code: "ON" }),
+        ...(effectiveSaturdayDelivery && { saturday_delivery: true }),
       },
     };
 
@@ -353,21 +421,26 @@ export class EasyPostShippingClient {
     }
 
     // Create shipment via EasyPost API
-    const shipment = await this.client.Shipment.create(shipmentParams);
+    // Wrap in try/catch: some routes reject saturday_delivery with 422 instead of empty rates
+    const fallbackOpts = { carrier: options.carrier, orderId: options.orderId };
+    let shipment;
+    try {
+      shipment = await this.client.Shipment.create(shipmentParams);
+    } catch (error: any) {
+      const is422 = error.statusCode === 422 || error.status === 422;
+      if (is422 && effectiveSaturdayDelivery) {
+        return this.handleSaturdayFallback(shipmentParams, fallbackOpts, toAddress, fromAddress, options.parcel);
+      }
+      throw error;
+    }
 
     // Extract rates
-    const rates: Rate[] = (shipment.rates || [])
-      .filter((r: any) => !options.carrier || r.carrier?.toLowerCase() === options.carrier.toLowerCase())
-      .map((r: any) => ({
-        id: r.id,
-        carrier: r.carrier,
-        service: r.service,
-        rate: r.rate,
-        currency: r.currency,
-        delivery_days: r.delivery_days,
-        delivery_date: r.delivery_date,
-      }))
-      .sort((a: Rate, b: Rate) => parseFloat(a.rate) - parseFloat(b.rate));
+    const rates = this.extractAndFilterRates(shipment.rates, options.carrier);
+
+    // Saturday delivery fallback: if requested but zero rates, retry without it
+    if (rates.length === 0 && effectiveSaturdayDelivery) {
+      return this.handleSaturdayFallback(shipmentParams, fallbackOpts, toAddress, fromAddress, options.parcel);
+    }
 
     if (rates.length === 0) {
       throw new Error(
@@ -385,6 +458,7 @@ export class EasyPostShippingClient {
       parcel: options.parcel,
       rates,
       status: "pending",
+      ...(effectiveSaturdayDelivery && { saturdayDelivery: true }),
     };
 
     const state = this.loadState();
@@ -573,6 +647,106 @@ export class EasyPostShippingClient {
   // UTILITY
   // ============================================
 
+  /**
+   * Checks whether Saturday delivery is available for a route without persisting state.
+   *
+   * Creates a probe shipment with saturday_delivery=true but does NOT save to pending-shipments.json.
+   * This is free (no charges until buyLabel).
+   *
+   * @param options - Route and parcel details
+   * @returns Availability result with service/rate details if available
+   */
+  async checkSaturdayAvailability(options: {
+    toZip: string;
+    toCountry: string;
+    parcel: Parcel;
+    service?: string;
+  }): Promise<{ available: boolean; service?: string; rate?: string; currency?: string; message: string }> {
+    const fromAddress = this.getFromAddress();
+
+    const shipmentParams: any = {
+      to_address: {
+        name: "Saturday Check",
+        street1: "N/A",
+        city: "N/A",
+        state: "",
+        zip: options.toZip,
+        country: options.toCountry,
+      },
+      from_address: {
+        company: fromAddress.company,
+        street1: fromAddress.street1,
+        street2: fromAddress.street2,
+        city: fromAddress.city,
+        state: fromAddress.state,
+        zip: fromAddress.zip,
+        country: fromAddress.country,
+        phone: fromAddress.phone,
+      },
+      parcel: {
+        weight: this.kgToOunces(options.parcel.weight),
+        ...(options.parcel.length && { length: this.cmToInches(options.parcel.length) }),
+        ...(options.parcel.width && { width: this.cmToInches(options.parcel.width) }),
+        ...(options.parcel.height && { height: this.cmToInches(options.parcel.height) }),
+      },
+      options: {
+        saturday_delivery: true,
+      },
+    };
+
+    if (this.config.easypost.upsAccountId) {
+      shipmentParams.carrier_accounts = [this.config.easypost.upsAccountId];
+    }
+
+    try {
+      const shipment = await this.client.Shipment.create(shipmentParams);
+      const rates = this.extractAndFilterRates(shipment.rates, "UPS");
+
+      if (rates.length === 0) {
+        return { available: false, message: "Saturday delivery is not available for this route." };
+      }
+
+      // If a specific service was requested, check if it has Saturday rates
+      if (options.service) {
+        const matchingRate = rates.find((r) => r.service === options.service);
+        if (matchingRate) {
+          return {
+            available: true,
+            service: matchingRate.service,
+            rate: matchingRate.rate,
+            currency: matchingRate.currency,
+            message: `Saturday delivery available for ${matchingRate.service} (${matchingRate.currency} ${matchingRate.rate})`,
+          };
+        }
+        // Service not found but other Saturday rates exist
+        const cheapest = rates[0];
+        return {
+          available: true,
+          service: cheapest.service,
+          rate: cheapest.rate,
+          currency: cheapest.currency,
+          message: `Saturday delivery not available for ${options.service}, but available for ${cheapest.service} (${cheapest.currency} ${cheapest.rate})`,
+        };
+      }
+
+      // No specific service — return cheapest
+      const cheapest = rates[0];
+      return {
+        available: true,
+        service: cheapest.service,
+        rate: cheapest.rate,
+        currency: cheapest.currency,
+        message: `Saturday delivery available for ${cheapest.service} (${cheapest.currency} ${cheapest.rate})`,
+      };
+    } catch (error: any) {
+      const is422 = error.statusCode === 422 || error.status === 422;
+      if (is422) {
+        return { available: false, message: "Saturday delivery is not available for this route." };
+      }
+      throw error;
+    }
+  }
+
   /** Returns list of available CLI commands with descriptions. */
   getTools(): Array<{ name: string; description: string }> {
     return [
@@ -583,6 +757,7 @@ export class EasyPostShippingClient {
       { name: "list-pending", description: "List all pending (unpurchased) shipments" },
       { name: "get-rates", description: "Get rates for a pending shipment" },
       { name: "void-label", description: "Request refund for purchased label" },
+      { name: "check-saturday", description: "Check if Saturday delivery is available for a route (no charge)" },
       { name: "cache-stats", description: "Show cache statistics" },
       { name: "cache-clear", description: "Clear all cached data" },
     ];

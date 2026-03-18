@@ -49,6 +49,7 @@ const createShipmentSchema = z.object({
   carrier: z.string().optional().describe("Filter rates to carrier (e.g., UPS)"),
   labelSize: z.string().optional().describe("Label size (default: 4x6)"),
   labelFormat: z.string().optional().describe("Label format (default: PNG)"),
+  saturdayDelivery: z.boolean().optional().describe("Request Saturday delivery (filters to Saturday-eligible rates only)"),
 }).refine(
   (data) => data.orderId || (data.toStreet1 && data.toCity && data.toZip),
   {
@@ -78,7 +79,7 @@ const commands = {
         toPhone, toEmail, fromName, fromStreet1, fromStreet2, fromCity, fromState,
         fromZip, fromCountry, fromPhone, isReturn,
         weight, length, width, height, carrier, labelSize, labelFormat,
-        contentDescription, reference,
+        contentDescription, reference, saturdayDelivery,
       } = args as {
         orderId?: string;
         toName?: string;
@@ -108,6 +109,7 @@ const commands = {
         labelFormat?: string;
         contentDescription?: string;
         reference?: string;
+        saturdayDelivery?: boolean;
       };
 
       const createOptions: Parameters<typeof client.createShipment>[0] = {
@@ -123,6 +125,7 @@ const commands = {
         ...(isReturn && { isReturn }),
         ...(contentDescription && { contentDescription }),
         ...(reference && { reference }),
+        ...(saturdayDelivery && { saturdayDelivery }),
       };
 
       if (orderId) {
@@ -155,7 +158,11 @@ const commands = {
         };
       }
 
-      return client.createShipment(createOptions);
+      const result = await client.createShipment(createOptions);
+      if (result.saturdayFallback) {
+        process.stderr.write("⚠️ Saturday delivery was unavailable for this route — falling back to standard scheduling.\n");
+      }
+      return result;
     },
     "Create shipment, get rates (Stage 1)"
   ),
@@ -222,6 +229,41 @@ const commands = {
       return client.voidLabel(shipmentId);
     },
     "Request refund for purchased label"
+  ),
+
+  "check-saturday": createCommand(
+    z.object({
+      toZip: z.string().min(1).describe("Destination postal code"),
+      toCountry: z.string().default("GB").describe("Destination country code"),
+      weight: cliTypes.float(0.1).describe("Parcel weight in kg"),
+      length: cliTypes.float(1).optional().describe("Parcel length in cm"),
+      width: cliTypes.float(1).optional().describe("Parcel width in cm"),
+      height: cliTypes.float(1).optional().describe("Parcel height in cm"),
+      service: z.string().optional().describe("UPS service to check (e.g., UPSStandard)"),
+    }),
+    async (args, client: EasyPostShippingClient) => {
+      const { toZip, toCountry, weight, length, width, height, service } = args as {
+        toZip: string;
+        toCountry: string;
+        weight: number;
+        length?: number;
+        width?: number;
+        height?: number;
+        service?: string;
+      };
+      return client.checkSaturdayAvailability({
+        toZip,
+        toCountry,
+        parcel: {
+          weight,
+          ...(length && { length }),
+          ...(width && { width }),
+          ...(height && { height }),
+        },
+        service,
+      });
+    },
+    "Check if Saturday delivery is available for a route (no charge)"
   ),
 
   // Pre-built cache commands
