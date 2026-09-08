@@ -1,34 +1,21 @@
-/**
- * EasyPost Shipping API Client
- *
- * Creates UPS shipping labels via EasyPost API with two-stage confirmation workflow.
- * Integrates with Shopify for automatic address lookup.
- */
 
-import { readFileSync, writeFileSync, existsSync } from "fs";
-import { execFileSync } from "child_process";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
+import { readFileSync, existsSync } from "fs";
+import { secureStatePath, secureWrite } from "./vendor/secure-state/index.js";
 import EasyPost from "@easypost/api";
+import { loadServiceConfig, z } from "@local/cli-utils";
 import { PluginCache, TTL, createCacheKey } from "@local/plugin-cache";
+import { invokeServiceCli } from "./vendor/service-cli-invoker/index.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const STATE_PATH = secureStatePath("easypost", "pending-shipments.json");
 
-// State file for pending shipments (two-stage workflow)
-const STATE_PATH = "/tmp/easypost-pending-shipments.json";
+const EasyPostConfigSchema = z.object({
+  easypost: z.object({
+    apiKey: z.string().min(1),
+    upsAccountId: z.string().optional(),
+  }),
+});
 
-// Shopify CLI path
-const SHOPIFY_CLI =
-  process.env.HOME + "/.claude/plugins/local-marketplace/shopify-order-manager/scripts/dist/cli.js";
-
-// Interfaces
-interface EasyPostConfig {
-  easypost: {
-    apiKey: string;
-    upsAccountId?: string;
-  };
-}
+type EasyPostConfig = z.infer<typeof EasyPostConfigSchema>;
 
 interface Address {
   name?: string;
@@ -44,10 +31,10 @@ interface Address {
 }
 
 interface Parcel {
-  length?: number; // cm
-  width?: number; // cm
-  height?: number; // cm
-  weight: number; // kg
+  length?: number;
+  width?: number;
+  height?: number;
+  weight: number;
 }
 
 interface Rate {
@@ -103,11 +90,65 @@ interface PurchasedLabel {
   currency: string;
 }
 
-// Initialize cache
 const cache = new PluginCache({
   namespace: "easypost-shipping-manager",
   defaultTTL: TTL.FIVE_MINUTES,
 });
+
+type WrappedField = string | { value?: string | null } | null | undefined;
+
+interface ShopifyShippingAddress {
+  name?: WrappedField;
+  address1?: WrappedField;
+  address2?: WrappedField;
+  city?: WrappedField;
+  company?: WrappedField;
+  province?: string;
+  zip?: string;
+  country?: string;
+  countryCode?: string;
+  phone?: string;
+}
+
+interface GetOrderEnvelope {
+  content?: { shippingAddress?: ShopifyShippingAddress | null };
+}
+
+function unwrapField(field: WrappedField): string | undefined {
+  if (field == null) return undefined;
+  if (typeof field === "string") return field;
+  return field.value ?? undefined;
+}
+
+export function mapShopifyOrderAddress(envelope: GetOrderEnvelope, orderId: string): Address {
+  const addr = envelope.content?.shippingAddress;
+  if (!addr) {
+    throw new Error(`Order ${orderId} has no shipping address`);
+  }
+  const street1 = unwrapField(addr.address1);
+  const city = unwrapField(addr.city);
+  const zip = addr.zip;
+  if (!street1 || !city || !zip) {
+    const missing = [!street1 && "street1", !city && "city", !zip && "zip"]
+      .filter(Boolean)
+      .join(", ");
+    throw new Error(
+      `Order ${orderId} shipping address is incomplete (missing: ${missing}). ` +
+        `The shopify-order-manager get-order envelope shape may have changed.`,
+    );
+  }
+  return {
+    name: unwrapField(addr.name),
+    company: unwrapField(addr.company) || undefined,
+    street1,
+    street2: unwrapField(addr.address2) || undefined,
+    city,
+    state: addr.province || "",
+    zip,
+    country: addr.countryCode || addr.country || "GB",
+    phone: addr.phone || undefined,
+  };
+}
 
 export class EasyPostShippingClient {
   private client: InstanceType<typeof EasyPost>;
@@ -115,62 +156,37 @@ export class EasyPostShippingClient {
   private cacheDisabled: boolean = false;
 
   constructor() {
-    const configPath = join(__dirname, "..", "config.json");
-
-    if (!existsSync(configPath)) {
-      throw new Error(
-        `Config file not found at ${configPath}. Ensure credentials are loaded.`
-      );
-    }
-
-    const configFile: EasyPostConfig = JSON.parse(
-      readFileSync(configPath, "utf-8")
-    );
-
-    if (!configFile.easypost?.apiKey) {
-      throw new Error("Missing required config: easypost.apiKey");
-    }
-
-    this.config = configFile;
+    this.config = loadServiceConfig("easypost-shipping-manager", {
+      schema: EasyPostConfigSchema,
+      remedy: "Ensure credentials are loaded via cred-loader-sync.",
+    });
     this.client = new EasyPost(this.config.easypost.apiKey);
   }
 
-  // ============================================
-  // CACHE CONTROL
-  // ============================================
 
-  /** Disables caching for all subsequent requests. */
   disableCache(): void {
     this.cacheDisabled = true;
     cache.disable();
   }
 
-  /** Re-enables caching after it was disabled. */
   enableCache(): void {
     this.cacheDisabled = false;
     cache.enable();
   }
 
-  /** Returns cache statistics including hit/miss counts. */
   getCacheStats() {
     return cache.getStats();
   }
 
-  /** Clears all cached data. @returns Number of cache entries cleared */
   clearCache(): number {
     return cache.clear();
   }
 
-  /** Invalidates a specific cache key. @returns true if the key existed */
   invalidateCacheKey(key: string): boolean {
     return cache.invalidate(key);
   }
 
-  // ============================================
-  // STATE MANAGEMENT (Internal)
-  // ============================================
 
-  /** Load pending shipments state from file. */
   private loadState(): ShipmentState {
     if (!existsSync(STATE_PATH)) {
       return { shipments: {}, lastUpdated: new Date().toISOString() };
@@ -183,13 +199,11 @@ export class EasyPostShippingClient {
     }
   }
 
-  /** Save pending shipments state to file. */
   private saveState(state: ShipmentState): void {
     state.lastUpdated = new Date().toISOString();
-    writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+    secureWrite(STATE_PATH, JSON.stringify(state, null, 2));
   }
 
-  /** Get YOUR_CITY warehouse address. */
   private getFromAddress(): Address {
     return {
       company: "YOUR_COMPANY",
@@ -204,21 +218,15 @@ export class EasyPostShippingClient {
     };
   }
 
-  // ============================================
-  // UNIT CONVERSIONS
-  // ============================================
 
-  /** Convert kilograms to ounces (EasyPost format). */
   private kgToOunces(kg: number): number {
     return kg * 35.274;
   }
 
-  /** Convert centimeters to inches (EasyPost format). */
   private cmToInches(cm: number): number {
     return cm * 0.3937;
   }
 
-  /** Extract, filter, and sort rates from an EasyPost shipment response. */
   private extractAndFilterRates(rates: any[] = [], carrierFilter?: string): Rate[] {
     return rates
       .filter((r) => !carrierFilter || r.carrier?.toLowerCase() === carrierFilter.toLowerCase())
@@ -234,10 +242,6 @@ export class EasyPostShippingClient {
       .sort((a, b) => parseFloat(a.rate) - parseFloat(b.rate));
   }
 
-  /**
-   * Handles Saturday delivery fallback: retries shipment without saturday_delivery,
-   * persists the result with saturdayFallback flag.
-   */
   private async handleSaturdayFallback(
     shipmentParams: any,
     opts: { carrier?: string; orderId?: string },
@@ -279,81 +283,30 @@ export class EasyPostShippingClient {
     return fallbackShipment;
   }
 
-  // ============================================
-  // SHOPIFY INTEGRATION
-  // ============================================
 
-  /**
-   * Fetches shipping address from a Shopify order.
-   *
-   * @param orderId - Shopify order ID or order number
-   * @returns Parsed address from order
-   * @throws {Error} If order not found or has no shipping address
-   */
   async fetchShopifyOrderAddress(orderId: string): Promise<Address> {
-    if (!existsSync(SHOPIFY_CLI)) {
-      throw new Error(`Shopify CLI not found at ${SHOPIFY_CLI}`);
-    }
+    const result = await invokeServiceCli<GetOrderEnvelope>(
+      "shopify-order-manager",
+      "get-order",
+      { id: orderId },
+      { timeoutMs: 30000 },
+    );
 
-    try {
-      // Use execFileSync with arguments array to prevent shell injection
-      const result = execFileSync("node", [SHOPIFY_CLI, "get-order", "--id", orderId], {
-        encoding: "utf-8",
-        timeout: 30000,
-      });
-
-      const order = JSON.parse(result);
-
-      if (!order.shippingAddress) {
-        throw new Error(`Order ${orderId} has no shipping address`);
-      }
-
-      const addr = order.shippingAddress;
-
-      return {
-        name: [addr.firstName, addr.lastName].filter(Boolean).join(" ") || addr.name,
-        company: addr.company || undefined,
-        street1: addr.address1,
-        street2: addr.address2 || undefined,
-        city: addr.city,
-        state: addr.provinceCode || addr.province || "",
-        zip: addr.zip,
-        country: addr.countryCodeV2 || addr.countryCode || "GB",
-        phone: addr.phone || undefined,
-      };
-    } catch (error: any) {
-      if (error.message?.includes("not found")) {
+    if (!result.ok || !result.data) {
+      const errMsg = result.error || `exit ${result.exitCode}`;
+      if (/not found/i.test(errMsg)) {
         throw new Error(`Shopify order not found: ${orderId}`);
       }
-      throw new Error(
-        `Failed to fetch Shopify order: ${error.message || error}`
-      );
+      throw new Error(`Failed to fetch Shopify order: ${errMsg}`);
     }
+
+    return mapShopifyOrderAddress(result.data, orderId);
   }
 
-  // ============================================
-  // SHIPMENT OPERATIONS
-  // ============================================
 
-  /**
-   * Stage 1: Creates shipment and retrieves rates.
-   *
-   * This is the first step in the two-stage workflow. Creates a pending
-   * shipment and returns available rates. No charges until buyLabel() is called.
-   *
-   * @param options - Shipment options
-   * @param options.orderId - Shopify order ID (auto-fetches address)
-   * @param options.toAddress - Manual destination address (if no orderId)
-   * @param options.parcel - Parcel dimensions and weight
-   * @param options.carrier - Optional carrier filter (e.g., "UPS")
-   * @returns Pending shipment with available rates
-   *
-   * @throws {Error} If no rates available or invalid address
-   */
   async createShipment(options: CreateShipmentOptions): Promise<PendingShipment> {
     let toAddress: Address;
 
-    // Get destination address
     if (options.orderId) {
       toAddress = await this.fetchShopifyOrderAddress(options.orderId);
     } else if (options.toAddress) {
@@ -364,10 +317,8 @@ export class EasyPostShippingClient {
 
     const fromAddress = options.fromAddress || this.getFromAddress();
 
-    // Saturday delivery not applicable to return labels — silently normalize
     const effectiveSaturdayDelivery = options.saturdayDelivery && !options.isReturn;
 
-    // Build EasyPost shipment request
     const shipmentParams: any = {
       to_address: {
         name: toAddress.name,
@@ -415,13 +366,10 @@ export class EasyPostShippingClient {
       },
     };
 
-    // Filter to specific carrier account if configured
     if (this.config.easypost.upsAccountId) {
       shipmentParams.carrier_accounts = [this.config.easypost.upsAccountId];
     }
 
-    // Create shipment via EasyPost API
-    // Wrap in try/catch: some routes reject saturday_delivery with 422 instead of empty rates
     const fallbackOpts = { carrier: options.carrier, orderId: options.orderId };
     let shipment;
     try {
@@ -434,10 +382,8 @@ export class EasyPostShippingClient {
       throw error;
     }
 
-    // Extract rates
     const rates = this.extractAndFilterRates(shipment.rates, options.carrier);
 
-    // Saturday delivery fallback: if requested but zero rates, retry without it
     if (rates.length === 0 && effectiveSaturdayDelivery) {
       return this.handleSaturdayFallback(shipmentParams, fallbackOpts, toAddress, fromAddress, options.parcel);
     }
@@ -448,7 +394,6 @@ export class EasyPostShippingClient {
       );
     }
 
-    // Store pending shipment
     const pendingShipment: PendingShipment = {
       id: shipment.id,
       createdAt: new Date().toISOString(),
@@ -468,18 +413,6 @@ export class EasyPostShippingClient {
     return pendingShipment;
   }
 
-  /**
-   * Stage 2: Purchases label for a pending shipment.
-   *
-   * This is the second step - actually purchases the selected rate.
-   * Charges apply after this call succeeds.
-   *
-   * @param shipmentId - EasyPost shipment ID from createShipment()
-   * @param rateId - Rate ID to purchase (from available rates)
-   * @returns Purchased label with tracking code and label URL
-   *
-   * @throws {Error} If shipment not found, already purchased, or invalid rate
-   */
   async buyLabel(shipmentId: string, rateId: string): Promise<PurchasedLabel> {
     const state = this.loadState();
     const pendingShipment = state.shipments[shipmentId];
@@ -494,7 +427,6 @@ export class EasyPostShippingClient {
       );
     }
 
-    // Verify rate exists
     const rate = pendingShipment.rates.find((r) => r.id === rateId);
     if (!rate) {
       throw new Error(
@@ -502,7 +434,6 @@ export class EasyPostShippingClient {
       );
     }
 
-    // Purchase the label via EasyPost
     const purchasedShipment = await this.client.Shipment.buy(shipmentId, rateId);
 
     const label: PurchasedLabel = {
@@ -514,7 +445,6 @@ export class EasyPostShippingClient {
       currency: rate.currency,
     };
 
-    // Update state
     pendingShipment.status = "purchased";
     pendingShipment.trackingCode = label.trackingCode;
     pendingShipment.labelUrl = label.labelUrl;
@@ -523,12 +453,6 @@ export class EasyPostShippingClient {
     return label;
   }
 
-  /**
-   * Cancels an unpurchased pending shipment.
-   *
-   * @param shipmentId - Shipment ID to cancel
-   * @returns Success status and message
-   */
   cancelShipment(shipmentId: string): { success: boolean; message: string } {
     const state = this.loadState();
     const shipment = state.shipments[shipmentId];
@@ -550,14 +474,6 @@ export class EasyPostShippingClient {
     return { success: true, message: "Shipment cancelled. No charges incurred." };
   }
 
-  /**
-   * Gets shipment details from EasyPost API.
-   *
-   * @param shipmentId - EasyPost shipment ID
-   * @returns Shipment details with tracking info
-   *
-   * @cached TTL: 1 minute
-   */
   async getShipment(shipmentId: string): Promise<any> {
     const cacheKey = createCacheKey("shipment", { id: shipmentId });
 
@@ -582,11 +498,6 @@ export class EasyPostShippingClient {
     );
   }
 
-  /**
-   * Lists all pending (unpurchased) shipments.
-   *
-   * @returns Pending shipments sorted by creation date (newest first)
-   */
   listPending(): PendingShipment[] {
     const state = this.loadState();
     return Object.values(state.shipments)
@@ -597,13 +508,6 @@ export class EasyPostShippingClient {
       );
   }
 
-  /**
-   * Gets available rates for a pending shipment.
-   *
-   * @param shipmentId - Shipment ID
-   * @returns Array of available rates
-   * @throws {Error} If shipment not found
-   */
   getRates(shipmentId: string): Rate[] {
     const state = this.loadState();
     const shipment = state.shipments[shipmentId];
@@ -615,12 +519,6 @@ export class EasyPostShippingClient {
     return shipment.rates;
   }
 
-  /**
-   * Requests refund for a purchased label.
-   *
-   * @param shipmentId - Shipment ID to refund
-   * @returns Success status and refund details
-   */
   async voidLabel(shipmentId: string): Promise<{ success: boolean; message: string }> {
     try {
       const refund = await this.client.Shipment.refund(shipmentId);
@@ -643,19 +541,7 @@ export class EasyPostShippingClient {
     }
   }
 
-  // ============================================
-  // UTILITY
-  // ============================================
 
-  /**
-   * Checks whether Saturday delivery is available for a route without persisting state.
-   *
-   * Creates a probe shipment with saturday_delivery=true but does NOT save to pending-shipments.json.
-   * This is free (no charges until buyLabel).
-   *
-   * @param options - Route and parcel details
-   * @returns Availability result with service/rate details if available
-   */
   async checkSaturdayAvailability(options: {
     toZip: string;
     toCountry: string;
@@ -706,7 +592,6 @@ export class EasyPostShippingClient {
         return { available: false, message: "Saturday delivery is not available for this route." };
       }
 
-      // If a specific service was requested, check if it has Saturday rates
       if (options.service) {
         const matchingRate = rates.find((r) => r.service === options.service);
         if (matchingRate) {
@@ -718,7 +603,6 @@ export class EasyPostShippingClient {
             message: `Saturday delivery available for ${matchingRate.service} (${matchingRate.currency} ${matchingRate.rate})`,
           };
         }
-        // Service not found but other Saturday rates exist
         const cheapest = rates[0];
         return {
           available: true,
@@ -729,7 +613,6 @@ export class EasyPostShippingClient {
         };
       }
 
-      // No specific service — return cheapest
       const cheapest = rates[0];
       return {
         available: true,
@@ -747,7 +630,6 @@ export class EasyPostShippingClient {
     }
   }
 
-  /** Returns list of available CLI commands with descriptions. */
   getTools(): Array<{ name: string; description: string }> {
     return [
       { name: "create-shipment", description: "Create shipment from Shopify order or manual address, get rates" },

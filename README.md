@@ -3,7 +3,7 @@
 
 Create UPS shipping labels via EasyPost API with Shopify integration
 
-![Version](https://img.shields.io/badge/version-1.1.0-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![Version](https://img.shields.io/badge/version-1.1.1-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 
 ## Features
 
@@ -30,11 +30,11 @@ Create UPS shipping labels via EasyPost API with Shopify integration
 git clone https://github.com/bigl34/claude-code-plugin-easypost.git
 cd claude-code-plugin-easypost
 cp config.template.json config.json  # fill in your credentials
-cd scripts && npm install
+npm --prefix scripts install
 ```
 
 ```bash
-node scripts/dist/cli.js create-shipment
+npm --prefix scripts run cli -- create-shipment
 ```
 
 ## Installation
@@ -94,15 +94,15 @@ node scripts/dist/cli.js create-shipment
 
 ```bash
 # 15kg package from order
-node scripts/dist/cli.js create-shipment --order-id "gid://shopify/Order/12345" --weight 15
+npm --prefix scripts run cli -- create-shipment --order-id "gid://shopify/Order/12345" --weight 15
 
 # With dimensions (for accurate rates)
-node scripts/dist/cli.js create-shipment --order-id "gid://shopify/Order/12345" \
+npm --prefix scripts run cli -- create-shipment --order-id "gid://shopify/Order/12345" \
   --weight 25 --length 100 --width 50 --height 40
 ```
 
 ```bash
-node scripts/dist/cli.js create-shipment \
+npm --prefix scripts run cli -- create-shipment \
   --to-name "John Smith" \
   --to-street1 "123 Main Street" \
   --to-city "London" \
@@ -112,12 +112,12 @@ node scripts/dist/cli.js create-shipment \
 ```
 
 ```bash
-node scripts/dist/cli.js create-shipment --order-id "gid://shopify/Order/12345" \
+npm --prefix scripts run cli -- create-shipment --order-id "gid://shopify/Order/12345" \
   --weight 15 --carrier UPS
 ```
 
 ```bash
-node scripts/dist/cli.js list-pending
+npm --prefix scripts run cli -- list-pending
 ```
 
 ## How It Works
